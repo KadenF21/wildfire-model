@@ -1,0 +1,185 @@
+---
+title: "Working doc fin 450"
+format: html
+editor: visual
+---
+
+## 
+
+```{r}
+
+library(tidyverse)
+library(tidyquant)
+library(arrow)
+library(ggplot2)
+library(stringr)
+library(lubridate)
+library(geosphere)
+
+wf_data <- readr::read_csv("C:/Users/Geck/Desktop/wildfire/fp-historical-wildfire-data-2006-2025.csv") %>% 
+  group_by(FUEL_TYPE) %>% 
+  drop_na(FUEL_TYPE) 
+
+clean_wf_data <- wf_data %>% 
+  dplyr::select(FIRE_START_DATE,YEAR,FIRE_NUMBER,CURRENT_SIZE,SIZE_CLASS,LATITUDE,LONGITUDE,FIRE_ORIGIN,GENERAL_CAUSE,FIRE_TYPE,FIRE_POSITION_ON_SLOPE,WEATHER_CONDITIONS_OVER_FIRE,TEMPERATURE,RELATIVE_HUMIDITY,WIND_DIRECTION,WIND_SPEED,FUEL_TYPE,FIRST_BH_DATE,FIRST_BH_SIZE,FIRST_UC_DATE,FIRST_UC_SIZE,FIRST_EX_DATE,FIRST_EX_SIZE_PERIMETER) %>% 
+  dplyr::mutate(MONTH = substring(FIRE_START_DATE, 6,7)) %>%
+  dplyr::mutate(FIRE_START_DATE = lubridate::ymd(substring(FIRE_START_DATE,1,10))) %>%
+  dplyr::mutate(FIRST_BH_DATE = lubridate::ymd(substring(FIRST_BH_DATE,1,10))) %>% 
+  dplyr::mutate(FIRST_UC_DATE = lubridate::ymd(substring(FIRST_UC_DATE,1,10))) %>% 
+  group_by(FIRE_START_DATE)
+clean_wf_data
+
+ml_wf_data <- clean_wf_data %>% 
+  dplyr::select(CURRENT_SIZE,LATITUDE,LONGITUDE,GENERAL_CAUSE,TEMPERATURE,RELATIVE_HUMIDITY,WIND_DIRECTION,WIND_SPEED,FUEL_TYPE,MONTH) %>% 
+dplyr::filter(CURRENT_SIZE > .11)
+ml_wf_data
+
+```
+
+The `echo: false` option disables the printing of code (only output is displayed).
+
+```{r}
+#distance from major cities
+
+distance_appended <- ml_wf_data %>% 
+  dplyr::mutate(dist_edm_km = distHaversine(cbind(-113.323975, 53.631611), cbind(LONGITUDE, LATITUDE))/1000) %>% 
+  dplyr::mutate(dist_cal_km = distHaversine(cbind(-114.066666, 51.049999), cbind(LONGITUDE, LATITUDE))/1000) %>% 
+  dplyr::mutate(dist_ftm_km = distHaversine(cbind(-111.38103, 56.72676), cbind(LONGITUDE, LATITUDE))/1000) %>% 
+  dplyr::mutate(dist_pr_km = distHaversine(cbind(-117.289993, 56.237293), cbind(LONGITUDE, LATITUDE))/1000) %>% 
+  dplyr::mutate(dist_gp_km = distHaversine(cbind(-118.80271, 55.16667), cbind(LONGITUDE, LATITUDE))/1000) %>% 
+  dplyr::mutate(dist_whct_km = distHaversine(cbind(-115.683, 54.133), cbind(LONGITUDE, LATITUDE))/1000) %>% 
+  dplyr::mutate(dist_eds_km = distHaversine(cbind(-116.416667, 53.583333), cbind(LONGITUDE, LATITUDE))/1000) %>% 
+  dplyr::mutate(dist_slave_km = distHaversine(cbind(-114.76896, 55.28344), cbind(LONGITUDE, LATITUDE))/1000) %>% 
+  dplyr::mutate(dist_llb_km = distHaversine(cbind(-112.0588889 , 54.8563889), cbind(LONGITUDE, LATITUDE))/1000) %>% 
+  dplyr::mutate(dist_rmh_km = distHaversine(cbind(-114.9182, 52.37934320), cbind(LONGITUDE, LATITUDE))/1000)
+ 
+new_wf_ml <- distance_appended %>%
+dplyr::mutate(closest_city = pmin(dist_edm_km,dist_cal_km,dist_ftm_km,dist_pr_km,dist_gp_km,dist_whct_km,dist_eds_km,dist_slave_km,dist_llb_km,dist_rmh_km))%>%
+  dplyr::select(1:11,22)
+new_wf_ml
+
+```
+
+```{r}
+#basic analysis on closest city 
+small_fires <- ml_wf_data %>% 
+  dplyr::filter(FIRST_EX_SIZE_PERIMETER < 2000)
+
+small_fires_stats <- small_fires %>% 
+   ungroup() %>% 
+   dplyr::summarise(mean_dist = mean(closest_city),
+                    sd_dist = sd(closest_city),
+                    closest_dist = min(closest_city),
+                    furthest_dist = max(closest_city))
+small_fires_stats
+
+
+
+
+large_fires <- ml_wf %>% 
+  dplyr::filter(FIRST_EX_SIZE_PERIMETER > 2000)
+
+large_fires_stats <- large_fires %>% 
+  ungroup() %>% 
+   dplyr::summarise(mean_dist = mean(closest_city),
+                    sd_dist = sd(closest_city),
+                    closest_dist = min(closest_city),
+                    furthest_dist = max(closest_city))
+large_fires_stats
+
+```
+
+```{r}
+# ML model
+
+library(rsample)
+library(recipes)
+library(parsnip)
+library(yardstick)
+library(broom)
+
+
+
+split_wf <- new_wf_ml %>% 
+  rsample::initial_split(prop = .7, strata = GENERAL_CAUSE)
+
+train_wf <- rsample::training(split_wf)
+test_wf <- rsample::testing(split_wf)
+
+wf_feats <- recipes::recipe(CURRENT_SIZE ~., data = train_wf) %>% 
+  recipes::step_rm(FIRE_START_DATE) %>% 
+  recipes::step_log(CURRENT_SIZE) %>% 
+  recipes::step_normalize(all_numeric()) %>% 
+  recipes::step_unknown(WIND_DIRECTION) %>% 
+  recipes::step_dummy(GENERAL_CAUSE,WIND_DIRECTION,FUEL_TYPE) %>% 
+  recipes::prep()
+
+train_baked <- recipes::bake(wf_feats, train_wf)
+test_baked <- recipes::bake(wf_feats, test_wf)
+
+
+wf_lm <- 
+  parsnip::linear_reg(mode = "regression") %>% 
+  parsnip::set_engine("lm") %>% 
+  parsnip::fit(CURRENT_SIZE ~., data = train_baked)
+
+out <- wf_lm %>% 
+  stats::predict(new_data = test_baked) %>%
+  dplyr::bind_cols(CURRENT_SIZE = test_baked %>% 
+                     dplyr::ungroup() %>% 
+                     dplyr::select(CURRENT_SIZE))
+
+parsnip::tidy(wf_lm)
+parsnip::glance(wf_lm)
+
+wf_lm %>% 
+  stats::predict(new_data = test_baked) %>% 
+  dplyr::bind_cols(CURRENT_SIZE = test_baked %>% 
+  dplyr::ungroup() %>% 
+  dplyr::select(CURRENT_SIZE)) %>% 
+  yardstick::metrics(truth = CURRENT_SIZE, estimate = .pred) %>% 
+  dplyr::arrange(.metric)
+wf_lm
+
+parsnip::glance(wf_lm)
+```
+
+```{r}
+library(rpart.plot)
+
+recipe_pipeline <- 
+  recipes::recipe(CURRENT_SIZE ~ GENERAL_CAUSE + TEMPERATURE+ RELATIVE_HUMIDITY + WIND_SPEED + FUEL_TYPE, data = test_wf) %>% 
+  step_log(CURRENT_SIZE) %>%
+  recipes::prep()
+
+train_baked<-  recipes::bake(recipe_pipeline, train_wf)
+test_baked <- recipes::bake(recipe_pipeline, test_wf)
+
+
+model_cart <- parsnip::decision_tree(mode = "regression") %>% 
+  parsnip::set_engine("rpart") %>% 
+  parsnip::fit(CURRENT_SIZE ~ GENERAL_CAUSE + TEMPERATURE+ RELATIVE_HUMIDITY + WIND_SPEED + FUEL_TYPE, data = train_baked)
+
+model_cart
+
+
+wf_tree <- rpart.plot(
+  model_cart$fit,
+  roundint = F,
+  cex = .8,
+  tweak = .65,
+  fallen.leaves  = T,
+  extra = "auto",
+  main = "Regression Tree"
+)
+
+
+
+res <- model_cart %>% 
+  predict(new_data = test_baked) %>% 
+  bind_cols(test_baked %>% dplyr::select(CURRENT_SIZE)) %>% yardstick::metrics(truth = CURRENT_SIZE, estimate = .pred) %>% 
+  dplyr::arrange(.metric)
+res
+
+glimpse(train_baked)
+```
